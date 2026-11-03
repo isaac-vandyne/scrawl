@@ -248,7 +248,7 @@
       "id": "clipboard-image",
       "group": "finish",
       "name": "Image and text on one clipboard",
-      "says": "Copies the contact sheet with the text, so one ⌘V attaches the image in a browser or Electron composer.",
+      "says": "Copies the contact sheet together with the text, so one ⌘V offers a composer the image as well as the transcript.",
       "status": "main",
       "platforms": ["mac", "windows"],
       "added": "2026-10-20",

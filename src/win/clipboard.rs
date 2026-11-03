@@ -143,8 +143,9 @@ pub fn set_png(png_bytes: &[u8]) -> Result<()> {
     set_png_and_text(png_bytes, None)
 }
 
-/// The image and, with `text`, the text too, so one Ctrl+V gives each app what it takes: a
-/// browser or Electron composer attaches the image and inserts the text, a terminal the text.
+/// The image and, with `text`, the text too, so one Ctrl+V offers the pasting app both: a browser
+/// or Electron composer can attach the image and insert the text (it decides), a terminal reads
+/// the text.
 pub fn set_png_and_text(png_bytes: &[u8], text: Option<&str>) -> Result<()> {
     let (width, height, rgba) = decode_png(png_bytes)?;
     let dib = dib_v5(width, height, &rgba);

@@ -222,9 +222,8 @@ pub fn copy_png_to_clipboard(png_bytes: &[u8]) -> Result<()> {
 }
 
 /// The image and, with `text`, the text too, as one pasteboard item carrying both flavors, so one
-/// ⌘V gives each app what it takes: a browser or Electron composer attaches the image and inserts
-/// the text, a terminal the text. PNG is declared first, the richest flavor an image reader asks
-/// for.
+/// ⌘V offers the pasting app both: an image reader finds the PNG (declared first, the richest
+/// flavor), a terminal the string. Which it takes is the app's own paste handling, not ours.
 #[cfg(target_os = "macos")]
 pub fn copy_png_and_text_to_clipboard(png_bytes: &[u8], text: Option<&str>) -> Result<()> {
     use objc2_app_kit::{NSPasteboard, NSPasteboardTypePNG, NSPasteboardTypeString};
@@ -279,9 +278,9 @@ fn clipboard_payload(bundle_dir: &Path) -> Result<(Option<Vec<u8>>, String)> {
 }
 
 /// Leaves the contact sheet and the text on the clipboard together, so one ⌘V (Ctrl+V on Windows)
-/// attaches the image and inserts the transcript in a browser composer — a web agent session — and
-/// pastes the text alone in a terminal. An unreadable sheet, or an image the clipboard refuses,
-/// falls back to the text.
+/// offers a cloud agent's composer the image as well as the transcript — the picture being the
+/// half it can actually open. An unreadable sheet, or an image the clipboard refuses, falls back
+/// to the text. See `docs/keyframes-and-text.md` for what a composer does with both flavors.
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 pub fn copy_bundle_to_clipboard(bundle_dir: &Path) -> Result<()> {
     let (image, summary) = clipboard_payload(bundle_dir)?;
@@ -1811,18 +1810,42 @@ mod tests {
         assert!(resolve_bundle_dir(&fixture.0.join("missing.scrawl")).is_err());
     }
 
-    /// A finished capture hands the agent the picture as well as the words: the clipboard carries
-    /// `contact-sheet.png` next to `summary.md`'s text, so one paste into a web agent composer
-    /// attaches the image alongside the transcribed feedback instead of text that points at a
-    /// file the remote agent can't open.
+    /// A real 2×2 PNG. Pasteboard tests write a decodable image, not bytes that merely sit under
+    /// the PNG flavor, so what a composer would try to decode is what the test checks.
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    fn tiny_png() -> Vec<u8> {
+        let mut out = Vec::new();
+        let mut encoder = png::Encoder::new(&mut out, 2, 2);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        let mut writer = encoder.write_header().unwrap();
+        writer.write_image_data(&[255; 16]).unwrap();
+        writer.finish().unwrap();
+        out
+    }
+
+    /// The PNG's dimensions, to prove a pasteboard round trip carried a decodable image.
+    #[cfg(target_os = "macos")]
+    fn png_size(bytes: &[u8]) -> (u32, u32) {
+        let reader = png::Decoder::new(std::io::Cursor::new(bytes))
+            .read_info()
+            .expect("decodable PNG");
+        (reader.info().width, reader.info().height)
+    }
+
+    /// A finished capture hands the agent the picture as well as the words: the payload pairs
+    /// `contact-sheet.png` with `summary.md`'s text, so one paste into a web agent composer can
+    /// attach the image alongside the transcribed feedback instead of text that points at a file
+    /// the remote agent can't open. The native write is covered by the pasteboard tests below.
     #[cfg(any(target_os = "macos", target_os = "windows"))]
     #[test]
-    fn the_clipboard_carries_the_contact_sheet_with_the_text() {
+    fn the_clipboard_payload_pairs_the_contact_sheet_with_the_text() {
         let fixture = Fixture::new();
         let path = fixture.bundle("capture", 1);
-        fs::write(path.join("contact-sheet.png"), b"sheet").unwrap();
+        let png = tiny_png();
+        fs::write(path.join("contact-sheet.png"), &png).unwrap();
         let (image, summary) = clipboard_payload(&path).unwrap();
-        assert_eq!(image.as_deref(), Some(&b"sheet"[..]));
+        assert_eq!(image, Some(png));
         assert!(summary.starts_with("[scrawl 0:07 · Display ·"), "{summary}");
     }
 
@@ -1835,6 +1858,70 @@ mod tests {
         let (image, summary) = clipboard_payload(&fixture.bundle("capture", 1)).unwrap();
         assert!(image.is_none());
         assert!(summary.starts_with("[scrawl 0:07 · Display ·"), "{summary}");
+    }
+
+    /// The general pasteboard is process-wide: pasteboard tests take it one at a time, and they
+    /// replace whatever the clipboard held, which is the price of testing the clipboard itself.
+    #[cfg(target_os = "macos")]
+    fn held_pasteboard() -> std::sync::MutexGuard<'static, ()> {
+        static HELD: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        HELD.lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// What `copy_bundle_to_clipboard` actually leaves on the macOS pasteboard, read back through
+    /// AppKit: a decodable `contact-sheet.png` *and* the transcript, both on the clipboard at once.
+    /// A payload-level test can't see a declare/set sequence that drops a flavor — the bug this
+    /// change exists to fix (text alone) would pass it — so this reads the real thing.
+    /// Available formats only: whether a given composer consumes both in one paste is its own
+    /// behavior and is not asserted here.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_pasteboard_holds_the_image_and_the_transcript() {
+        use objc2_app_kit::{NSPasteboard, NSPasteboardTypePNG, NSPasteboardTypeString};
+
+        let _held = held_pasteboard();
+        let fixture = Fixture::new();
+        let path = fixture.bundle("capture", 1);
+        let png = tiny_png();
+        fs::write(path.join("contact-sheet.png"), &png).unwrap();
+
+        copy_bundle_to_clipboard(&path).unwrap();
+
+        let pasteboard = NSPasteboard::generalPasteboard();
+        let image = unsafe { pasteboard.dataForType(NSPasteboardTypePNG) }
+            .expect("the contact sheet is on the pasteboard");
+        assert_eq!(image.to_vec(), png);
+        assert_eq!(png_size(&image.to_vec()), (2, 2));
+        let text = unsafe { pasteboard.stringForType(NSPasteboardTypeString) }
+            .expect("the transcript is on the pasteboard")
+            .to_string();
+        assert!(text.starts_with("[scrawl 0:07 · Display ·"), "{text}");
+        assert!(text.contains("Open contact-sheet.png"), "{text}");
+    }
+
+    /// With no contact sheet to copy, the pasteboard holds the transcript and no stale image: the
+    /// fallback clears the PNG flavor rather than leaving an earlier capture's sheet attached to
+    /// this capture's words.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_missing_contact_sheet_leaves_only_text_on_the_pasteboard() {
+        use objc2_app_kit::{NSPasteboard, NSPasteboardTypePNG, NSPasteboardTypeString};
+
+        let _held = held_pasteboard();
+        let fixture = Fixture::new();
+        let with_sheet = fixture.bundle("earlier", 1);
+        fs::write(with_sheet.join("contact-sheet.png"), tiny_png()).unwrap();
+        copy_bundle_to_clipboard(&with_sheet).unwrap();
+
+        copy_bundle_to_clipboard(&fixture.bundle("sheetless", 2)).unwrap();
+
+        let pasteboard = NSPasteboard::generalPasteboard();
+        assert!(unsafe { pasteboard.dataForType(NSPasteboardTypePNG) }.is_none());
+        let text = unsafe { pasteboard.stringForType(NSPasteboardTypeString) }
+            .expect("the transcript is on the pasteboard")
+            .to_string();
+        assert!(text.starts_with("[scrawl 0:07 · Display ·"), "{text}");
     }
 
     #[test]
