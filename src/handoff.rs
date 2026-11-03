@@ -218,19 +218,38 @@ pub fn copy_string_to_clipboard(content: &str) -> Result<()> {
 
 #[cfg(target_os = "macos")]
 pub fn copy_png_to_clipboard(png_bytes: &[u8]) -> Result<()> {
-    use objc2_app_kit::{NSPasteboard, NSPasteboardTypePNG};
-    use objc2_foundation::{NSArray, NSData};
+    copy_png_and_text_to_clipboard(png_bytes, None)
+}
+
+/// The image and, with `text`, the text too, as one pasteboard item carrying both flavors, so one
+/// ⌘V gives each app what it takes: a browser or Electron composer attaches the image and inserts
+/// the text, a terminal the text. PNG is declared first, the richest flavor an image reader asks
+/// for.
+#[cfg(target_os = "macos")]
+pub fn copy_png_and_text_to_clipboard(png_bytes: &[u8], text: Option<&str>) -> Result<()> {
+    use objc2_app_kit::{NSPasteboard, NSPasteboardTypePNG, NSPasteboardTypeString};
+    use objc2_foundation::{NSArray, NSData, NSString};
 
     let data = NSData::with_bytes(png_bytes);
+    let string = text.map(NSString::from_str);
     let pasteboard = NSPasteboard::generalPasteboard();
     unsafe {
-        let types = NSArray::from_slice(&[NSPasteboardTypePNG]);
+        let mut types = vec![NSPasteboardTypePNG];
+        if string.is_some() {
+            types.push(NSPasteboardTypeString);
+        }
         pasteboard.clearContents();
-        pasteboard.declareTypes_owner(&types, None);
+        pasteboard.declareTypes_owner(&NSArray::from_slice(&types), None);
         ensure!(
             pasteboard.setData_forType(Some(&data), NSPasteboardTypePNG),
             "Could not copy PNG image to clipboard"
         );
+        if let Some(string) = string {
+            ensure!(
+                pasteboard.setString_forType(&string, NSPasteboardTypeString),
+                "Could not copy text to clipboard"
+            );
+        }
     }
     Ok(())
 }
@@ -245,14 +264,29 @@ pub fn copy_png_to_clipboard(png_bytes: &[u8]) -> Result<()> {
     crate::win::clipboard::set_png(png_bytes)
 }
 
+#[cfg(target_os = "windows")]
+pub fn copy_png_and_text_to_clipboard(png_bytes: &[u8], text: Option<&str>) -> Result<()> {
+    crate::win::clipboard::set_png_and_text(png_bytes, text)
+}
+
+/// What a finished capture puts on the clipboard: `summary.md`'s text, and `contact-sheet.png`
+/// when it can be read (a bundle whose sheet is missing still hands over its text).
 #[cfg(any(target_os = "macos", target_os = "windows"))]
-pub fn copy_bundle_to_clipboard(bundle_dir: &Path) -> Result<()> {
+fn clipboard_payload(bundle_dir: &Path) -> Result<(Option<Vec<u8>>, String)> {
     let (directory, bundle) = load_bundle(bundle_dir)?;
     let summary = crate::sketch::summary_markdown(&bundle, &directory);
-    #[cfg(target_os = "windows")]
-    if experiment("clipboardImage")
-        && let Ok(image) = fs::read(directory.join(&bundle.contact_sheet))
-        && crate::win::clipboard::set_png_and_text(&image, Some(&summary)).is_ok()
+    Ok((fs::read(directory.join(&bundle.contact_sheet)).ok(), summary))
+}
+
+/// Leaves the contact sheet and the text on the clipboard together, so one ⌘V (Ctrl+V on Windows)
+/// attaches the image and inserts the transcript in a browser composer — a web agent session — and
+/// pastes the text alone in a terminal. An unreadable sheet, or an image the clipboard refuses,
+/// falls back to the text.
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+pub fn copy_bundle_to_clipboard(bundle_dir: &Path) -> Result<()> {
+    let (image, summary) = clipboard_payload(bundle_dir)?;
+    if let Some(image) = image
+        && copy_png_and_text_to_clipboard(&image, Some(&summary)).is_ok()
     {
         return Ok(());
     }
@@ -1775,6 +1809,32 @@ mod tests {
         );
         assert!(resolve_bundle_dir(&fixture.0).is_err());
         assert!(resolve_bundle_dir(&fixture.0.join("missing.scrawl")).is_err());
+    }
+
+    /// A finished capture hands the agent the picture as well as the words: the clipboard carries
+    /// `contact-sheet.png` next to `summary.md`'s text, so one paste into a web agent composer
+    /// attaches the image alongside the transcribed feedback instead of text that points at a
+    /// file the remote agent can't open.
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    #[test]
+    fn the_clipboard_carries_the_contact_sheet_with_the_text() {
+        let fixture = Fixture::new();
+        let path = fixture.bundle("capture", 1);
+        fs::write(path.join("contact-sheet.png"), b"sheet").unwrap();
+        let (image, summary) = clipboard_payload(&path).unwrap();
+        assert_eq!(image.as_deref(), Some(&b"sheet"[..]));
+        assert!(summary.starts_with("[scrawl 0:07 · Display ·"), "{summary}");
+    }
+
+    /// A bundle whose contact sheet never got written (a failed render, a half-copied bundle) must
+    /// still hand over its transcript rather than failing the whole handoff.
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    #[test]
+    fn a_missing_contact_sheet_still_copies_the_text() {
+        let fixture = Fixture::new();
+        let (image, summary) = clipboard_payload(&fixture.bundle("capture", 1)).unwrap();
+        assert!(image.is_none());
+        assert!(summary.starts_with("[scrawl 0:07 · Display ·"), "{summary}");
     }
 
     #[test]
