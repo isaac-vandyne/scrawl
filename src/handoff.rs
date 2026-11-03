@@ -1743,6 +1743,7 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     struct Fixture(PathBuf);
+    const FEEDBACK: &str = "Make this button easier to see — keep the label.";
     impl Fixture {
         fn new() -> Self {
             static COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -1780,6 +1781,20 @@ mod tests {
                 serde_json::to_vec(&bundle).unwrap(),
             )
             .unwrap();
+            path
+        }
+
+        fn feedback_bundle(&self, name: &str, created: u64) -> PathBuf {
+            let path = self.bundle(name, created);
+            let manifest = path.join("scrawl.json");
+            let mut bundle: serde_json::Value =
+                serde_json::from_slice(&fs::read(&manifest).unwrap()).unwrap();
+            bundle["transcript"] = serde_json::json!({
+                "source": "fixture", "text": FEEDBACK,
+                "segments": [{"t0": 0, "t1": 7_000, "text": FEEDBACK}]
+            });
+            bundle["keyframes"][0]["said"] = serde_json::json!(FEEDBACK);
+            fs::write(manifest, serde_json::to_vec(&bundle).unwrap()).unwrap();
             path
         }
     }
@@ -1841,12 +1856,13 @@ mod tests {
     #[test]
     fn the_clipboard_payload_pairs_the_contact_sheet_with_the_text() {
         let fixture = Fixture::new();
-        let path = fixture.bundle("capture", 1);
+        let path = fixture.feedback_bundle("capture", 1);
         let png = tiny_png();
         fs::write(path.join("contact-sheet.png"), &png).unwrap();
         let (image, summary) = clipboard_payload(&path).unwrap();
         assert_eq!(image, Some(png));
         assert!(summary.starts_with("[scrawl 0:07 · Display ·"), "{summary}");
+        assert!(summary.contains(FEEDBACK), "{summary}");
     }
 
     /// A bundle whose contact sheet never got written (a failed render, a half-copied bundle) must
@@ -1855,9 +1871,10 @@ mod tests {
     #[test]
     fn a_missing_contact_sheet_still_copies_the_text() {
         let fixture = Fixture::new();
-        let (image, summary) = clipboard_payload(&fixture.bundle("capture", 1)).unwrap();
+        let (image, summary) = clipboard_payload(&fixture.feedback_bundle("capture", 1)).unwrap();
         assert!(image.is_none());
         assert!(summary.starts_with("[scrawl 0:07 · Display ·"), "{summary}");
+        assert!(summary.contains(FEEDBACK), "{summary}");
     }
 
     /// The general pasteboard is process-wide: pasteboard tests take it one at a time, and they
@@ -1882,7 +1899,7 @@ mod tests {
 
         let _held = held_pasteboard();
         let fixture = Fixture::new();
-        let path = fixture.bundle("capture", 1);
+        let path = fixture.feedback_bundle("capture", 1);
         let png = tiny_png();
         fs::write(path.join("contact-sheet.png"), &png).unwrap();
 
@@ -1897,7 +1914,7 @@ mod tests {
             .expect("the transcript is on the pasteboard")
             .to_string();
         assert!(text.starts_with("[scrawl 0:07 · Display ·"), "{text}");
-        assert!(text.contains("Open contact-sheet.png"), "{text}");
+        assert!(text.contains(FEEDBACK), "{text}");
     }
 
     /// With no contact sheet to copy, the pasteboard holds the transcript and no stale image: the
@@ -1914,7 +1931,7 @@ mod tests {
         fs::write(with_sheet.join("contact-sheet.png"), tiny_png()).unwrap();
         copy_bundle_to_clipboard(&with_sheet).unwrap();
 
-        copy_bundle_to_clipboard(&fixture.bundle("sheetless", 2)).unwrap();
+        copy_bundle_to_clipboard(&fixture.feedback_bundle("sheetless", 2)).unwrap();
 
         let pasteboard = NSPasteboard::generalPasteboard();
         assert!(unsafe { pasteboard.dataForType(NSPasteboardTypePNG) }.is_none());
@@ -1922,6 +1939,7 @@ mod tests {
             .expect("the transcript is on the pasteboard")
             .to_string();
         assert!(text.starts_with("[scrawl 0:07 · Display ·"), "{text}");
+        assert!(text.contains(FEEDBACK), "{text}");
     }
 
     #[test]
