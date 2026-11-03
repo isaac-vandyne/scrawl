@@ -248,9 +248,9 @@
       "id": "clipboard-image",
       "group": "finish",
       "name": "Image and text on one clipboard",
-      "says": "Copies the contact sheet with the text, so one Ctrl+V attaches the image in a browser or Electron composer.",
-      "status": "experiment:clipboardImage",
-      "platforms": ["windows"],
+      "says": "Copies the contact sheet with the text, so one ⌘V attaches the image in a browser or Electron composer.",
+      "status": "main",
+      "platforms": ["mac", "windows"],
       "added": "2026-10-20",
       "pr": 68,
       "docs": ["docs/keyframes-and-text.md"]

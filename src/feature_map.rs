@@ -216,12 +216,7 @@ fn the_scanner_sees_known_keys_and_flags() {
         );
     }
     let flags = experiments(&sources).unwrap();
-    for flag in [
-        "agentContext",
-        "liveTranscribe",
-        "smartRouting",
-        "clipboardImage",
-    ] {
+    for flag in ["agentContext", "liveTranscribe", "smartRouting"] {
         assert!(
             flags.contains(flag),
             "scanner missed experiment {flag}: {flags:?}"
