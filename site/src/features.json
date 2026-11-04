@@ -770,22 +770,22 @@
     {
       "id": "mac-download",
       "group": "install",
-      "name": "Mac download and Homebrew",
-      "says": "A notarized DMG for Apple silicon, or brew install --cask kitlangton/tap/scrawl.",
-      "status": "stable@0.3.4",
+      "name": "Local Mac fork install",
+      "says": "Builds and signs this fork locally, installs Scrawl.app, and backs up the previous app.",
+      "status": "main",
       "platforms": ["mac"],
-      "note": "Windows has its own zip.",
-      "docs": ["README.md#install", "docs/release.md"]
+      "note": "Uses a local signing identity or ad hoc signing. Upstream releases still offer notarized DMGs and Homebrew.",
+      "docs": ["README.md#install"]
     },
     {
       "id": "sparkle",
       "group": "install",
-      "name": "Automatic updates",
-      "says": "The Mac app updates itself with Sparkle; Check for Updates… is in the menu and Settings › About.",
-      "status": "stable@0.3.4",
+      "name": "Source-managed fork updates",
+      "says": "Rerun the local installer to update this fork. Fork bundles omit the upstream Sparkle framework and update feed.",
+      "status": "main",
       "platforms": ["mac"],
-      "note": "On Windows and Linux, Check for Updates… opens the releases page.",
-      "docs": ["docs/release.md"]
+      "note": "Upstream distributions retain their updater. Fork builds cannot automatically replace themselves with an upstream release.",
+      "docs": ["README.md#install"]
     },
     {
       "id": "windows-zip",
