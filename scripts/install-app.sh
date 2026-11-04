@@ -13,11 +13,11 @@ ROLLBACK_APP=""
 MACOS_DIR="${STAGE_APP}/Contents/MacOS"
 RESOURCES_DIR="${STAGE_APP}/Contents/Resources"
 REPLACEMENT_STARTED=0
-INSTALL_SUCCEEDED=0
+INSTALL_VERIFIED=0
 finish_install() {
   local result=$?
   trap - EXIT
-  if [[ "${INSTALL_SUCCEEDED}" != "1" ]] && {
+  if [[ "${INSTALL_VERIFIED}" != "1" ]] && {
     [[ "${REPLACEMENT_STARTED}" == "1" ]] || [[ -e "${ROLLBACK_APP}" ]];
   }; then
     rm -rf "${APP_DIR}"
@@ -37,8 +37,18 @@ finish_install() {
 }
 trap finish_install EXIT
 
+# Nothing that can be mistaken for another Scrawl build may remain when onboarding starts.
+remove_build_copies() {
+  rm -rf "${ROLLBACK_DIR}" "${STAGE_APP}" || return
+  ROLLBACK_DIR=""
+  ROLLBACK_APP=""
+  taskpolicy -c utility cargo clean --locked --target-dir "${REPO_DIR}/target" -p scrawl || return
+  # build.rs writes this beside the app binary; Cargo does not track that side effect.
+  rm -f "${REPO_DIR}/target/debug/scrawl-helper" "${REPO_DIR}/target/release/scrawl-helper"
+}
+
 cd "${REPO_DIR}"
-BUILD_ARGS=(build --locked -j 3)
+BUILD_ARGS=(build --locked --target-dir "${REPO_DIR}/target" -j 3)
 RUNTIME_SHADERS="${SCRAWL_RUNTIME_SHADERS:-auto}"
 if [[ "${RUNTIME_SHADERS}" == "1" ]] || {
   [[ "${RUNTIME_SHADERS}" == "auto" ]] && ! xcrun --sdk macosx metal --version >/dev/null 2>&1;
@@ -119,15 +129,26 @@ running_pids() {
   done
 }
 
-OLD_PIDS="$(running_pids)"
+installed_process_pids() {
+  local pid executable
+  for pid in $(pgrep -x 'scrawl|scrawl-helper' 2>/dev/null || true); do
+    executable="$(ps -p "${pid}" -o comm= 2>/dev/null || true)"
+    if [[ "${executable}" == "${APP_DIR}/Contents/MacOS/scrawl" ]] ||
+       [[ "${executable}" == "${APP_DIR}/Contents/MacOS/scrawl-helper" ]]; then
+      echo "${pid}"
+    fi
+  done
+}
+
+OLD_PIDS="$(installed_process_pids)"
 if [[ -n "${OLD_PIDS}" ]]; then
   kill ${OLD_PIDS}
   for _ in {1..40}; do
-    [[ -z "$(running_pids)" ]] && break
+    [[ -z "$(installed_process_pids)" ]] && break
     sleep 0.05
   done
-  if [[ -n "$(running_pids)" ]]; then
-    echo "Scrawl is still running; quit it before replacing the app." >&2
+  if [[ -n "$(installed_process_pids)" ]]; then
+    echo "Scrawl or its helpers are still running; quit them before replacing the app." >&2
     exit 1
   fi
 fi
@@ -143,19 +164,27 @@ if ! /usr/bin/ditto "${STAGE_APP}" "${APP_DIR}"; then
   exit 1
 fi
 codesign --verify --deep --strict "${APP_DIR}"
+# Commit after the installed copy verifies. Earlier failures restore the old app; from here
+# onward the verified new app stays installed even if cleanup or launch cannot complete.
+INSTALL_VERIFIED=1
 echo "Installed ${APP_DIR} (${REVISION})."
+if ! remove_build_copies; then
+  echo "The verified app is installed, but other build copies could not be removed. Not launching." >&2
+  exit 1
+fi
 
 if [[ "${SCRAWL_NO_LAUNCH:-0}" == "1" ]]; then
-  INSTALL_SUCCEEDED=1
   exit 0
 fi
 mkdir -p "${HOME}/bin"
 ln -sf "${APP_DIR}/Contents/MacOS/scrawl" "${HOME}/bin/scrawl"
-open -a "${APP_DIR}"
+if ! open -a "${APP_DIR}"; then
+  echo "The verified app is installed, but macOS could not launch it." >&2
+  exit 1
+fi
 sleep 0.3
 if [[ -z "$(running_pids)" ]]; then
   echo "The app was installed but did not stay running." >&2
   exit 1
 fi
-INSTALL_SUCCEEDED=1
 echo "Running fork process: $(running_pids)"
