@@ -602,8 +602,9 @@
       "group": "settings",
       "name": "Settings window",
       "says": "General, Recording, Storage, Permissions, Agents and About, from the menu's Settings….",
-      "status": "stable@0.3.4",
+      "status": "main",
       "platforms": ["mac", "windows", "linux"],
+      "note": "The Mac window can be enlarged from 620 × 448 points; pane controls scroll while the title and sidebar stay fixed.",
       "docs": ["README.md#settings", "docs/onboarding-and-settings.md"]
     },
     {

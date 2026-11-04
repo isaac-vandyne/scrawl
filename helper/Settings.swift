@@ -812,7 +812,7 @@ struct SettingsView: View {
           if model.state.recording != nil { model.act("cancel-shortcut") }
         }
     }
-    .frame(width: SettingsMetrics.width, height: SettingsMetrics.height)
+    .frame(maxWidth: .infinity, maxHeight: .infinity)
     .environment(\.settingsTheme, theme)
   }
 
@@ -895,15 +895,20 @@ struct SettingsView: View {
           .foregroundStyle(SettingsTheme(scheme).text)
       }
       .frame(height: SettingsMetrics.titlebar)
-      switch pane {
-      case .general: general
-      case .recording: recording
-      case .storage: storage
-      case .permissions: permissions
-      case .agents: agents
-      case .about: about
+      ScrollView(.vertical) {
+        VStack(alignment: .leading, spacing: 0) {
+          switch pane {
+          case .general: general
+          case .recording: recording
+          case .storage: storage
+          case .permissions: permissions
+          case .agents: agents
+          case .about: about
+          }
+        }
+        .frame(maxWidth: .infinity, alignment: .topLeading)
+        .padding(.bottom, SettingsMetrics.inset)
       }
-      Spacer(minLength: 0)
     }
     .padding(.horizontal, SettingsMetrics.inset)
   }
@@ -1354,7 +1359,7 @@ final class SettingsWindow: NSObject, NSApplicationDelegate, NSWindowDelegate {
   func applicationDidFinishLaunching(_: Notification) {
     let window = NSWindow(
       contentRect: NSRect(x: 0, y: 0, width: SettingsMetrics.width, height: SettingsMetrics.height),
-      styleMask: [.titled, .closable, .miniaturizable, .fullSizeContentView],
+      styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
       backing: .buffered,
       defer: false
     )
@@ -1368,6 +1373,7 @@ final class SettingsWindow: NSObject, NSApplicationDelegate, NSWindowDelegate {
     window.title = "Scrawl Settings"
     window.isMovableByWindowBackground = true
     window.isReleasedWhenClosed = false
+    window.minSize = NSSize(width: SettingsMetrics.width, height: SettingsMetrics.height)
     window.delegate = self
     let host = FirstClickHostingView(rootView: SettingsView(model: model))
     // The panes draw under the title bar themselves (the sidebar holds the traffic lights).
@@ -1538,15 +1544,48 @@ final class SettingsWindow: NSObject, NSApplicationDelegate, NSWindowDelegate {
       }
       model.advanceKeys(to: t)
       model.renderTime = t
-      let view = SettingsView(model: model)
-        .environment(\.colorScheme, light ? .light : .dark)
-        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-      let renderer = ImageRenderer(content: view)
-      renderer.scale = 2
-      guard let image = renderer.cgImage else { continue }
       let url = dir.appending(path: String(format: "%04d.png", frame))
-      try? NSBitmapImageRep(cgImage: image).representation(using: .png, properties: [:])?.write(to: url)
+      renderPNG(model: model, scheme: light ? .light : .dark, to: url)
     }
+  }
+
+  /// ImageRenderer omits AppKit-backed scroll views. Capture the real native view offscreen,
+  /// including its scroll position, without opening a visible window or touching settings.
+  @MainActor private static func renderPNG(model: SettingsModel, scheme: ColorScheme, to url: URL) {
+    NSApplication.shared.setActivationPolicy(.prohibited)
+    let size = NSSize(width: SettingsMetrics.width, height: SettingsMetrics.height)
+    let view = SettingsView(model: model)
+      .environment(\.colorScheme, scheme)
+      .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+    let host = NSHostingView(rootView: view)
+    host.safeAreaRegions = []
+    host.sizingOptions = []
+    let window = NSWindow(contentRect: NSRect(x: -10_000, y: -10_000, width: size.width, height: size.height),
+      styleMask: [.borderless], backing: .buffered, defer: false)
+    window.isReleasedWhenClosed = false
+    window.contentView = host
+    host.frame = NSRect(origin: .zero, size: size)
+    host.layoutSubtreeIfNeeded()
+    // Let SwiftUI complete its initial native layout before caching the AppKit view.
+    RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.04))
+    host.layoutSubtreeIfNeeded()
+    if CommandLine.arguments.contains("--scroll-bottom"),
+       let scroll = nativeScrollView(in: host), let document = scroll.documentView {
+      let bottom = document.isFlipped ? max(0, document.frame.height - scroll.contentView.bounds.height) : 0
+      scroll.contentView.scroll(to: NSPoint(x: 0, y: bottom))
+      scroll.reflectScrolledClipView(scroll.contentView)
+    }
+    host.displayIfNeeded()
+    if let rep = host.bitmapImageRepForCachingDisplay(in: host.bounds) {
+      host.cacheDisplay(in: host.bounds, to: rep)
+      try? rep.representation(using: .png, properties: [:])?.write(to: url)
+    }
+    window.close()
+  }
+
+  private static func nativeScrollView(in view: NSView) -> NSScrollView? {
+    if let scroll = view as? NSScrollView { return scroll }
+    return view.subviews.lazy.compactMap { nativeScrollView(in: $0) }.first
   }
 
   /// Every pane, dark and light, plus each state of the shortcut keys, as PNGs.
@@ -1717,16 +1756,9 @@ final class SettingsWindow: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
         model.pane = pane
         model.meter.level = 0.44
-        let view = SettingsView(model: model)
-          .environment(\.colorScheme, scheme)
-          .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-        let renderer = ImageRenderer(content: view)
-        renderer.scale = 2
-        guard let image = renderer.cgImage else { continue }
-        let rep = NSBitmapImageRep(cgImage: image)
         let suffix = scheme == .dark ? "dark" : "light"
         let url = dir.appending(path: String(format: "%02d-%@-%@.png", index, name, suffix))
-        try? rep.representation(using: .png, properties: [:])?.write(to: url)
+        renderPNG(model: model, scheme: scheme, to: url)
       }
     }
   }
