@@ -627,6 +627,7 @@ pub struct View {
     pub lower_playback: bool,
     pub playback_level: u8,
     pub video_export: bool,
+    pub include_compressed_recording: bool,
     pub retention: RetentionView,
     /// How much the captures folder takes, once measured.
     pub captures_size: Option<String>,
@@ -1193,7 +1194,7 @@ impl Panel {
                     return Effect::OpenLoginItems;
                 }
             }
-            ("autoSend" | "videoExport" | "lowerPlayback", serde_json::Value::Bool(on)) => {
+            ("autoSend" | "videoExport" | "lowerPlayback" | "includeCompressedRecording", serde_json::Value::Bool(on)) => {
                 write(key, (*on).into())
             }
             ("playbackLevel", serde_json::Value::Number(level))
@@ -1369,6 +1370,7 @@ impl Panel {
                 command,
             },
             video_export: config.video_export.unwrap_or(false),
+            include_compressed_recording: config.include_compressed_recording.unwrap_or(false),
             retention: RetentionView {
                 preset: policy.preset().map(preset_id),
                 options: crate::retention::Preset::ALL
@@ -2304,6 +2306,11 @@ mod tests {
         };
         assert!(panel.view(&host).auto_send);
         assert!(!panel.view(&host).lower_playback);
+        assert!(!panel.view(&host).include_compressed_recording);
+        set(&mut panel, &mut host, "includeCompressedRecording", true.into());
+        assert!(Panel::default().view(&host).include_compressed_recording);
+        set(&mut panel, &mut host, "includeCompressedRecording", false.into());
+        assert!(!Panel::default().view(&host).include_compressed_recording);
         assert_eq!(panel.view(&host).playback_level, 20);
         set(&mut panel, &mut host, "lowerPlayback", true.into());
         set(&mut panel, &mut host, "playbackLevel", 35.into());

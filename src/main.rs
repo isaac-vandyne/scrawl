@@ -52,6 +52,7 @@ mod speech_model;
 mod transcribe;
 mod ui;
 mod web;
+mod web_recording;
 #[cfg(target_os = "windows")]
 mod win;
 mod windows;
@@ -549,6 +550,9 @@ enum Command {
         /// Copy to the macOS clipboard instead of posting to OpenCode.
         #[arg(long)]
         clipboard: bool,
+        /// Include a compressed recording for this clipboard copy without changing Settings.
+        #[arg(long, requires = "clipboard")]
+        include_recording: bool,
     },
     /// Print which OpenCode session a capture of a browser tab would be sent to, without
     /// sending: a page registered through `/sdk.js`, else the project serving a localhost port.
@@ -2353,11 +2357,16 @@ fn main() -> Result<()> {
             session,
             reroute,
             clipboard,
+            include_recording,
         } => {
             let dir = handoff::resolve_bundle_dir(&bundle)?;
             if clipboard {
-                handoff::copy_bundle_to_clipboard(&dir)?;
-                println!("Copied {} to clipboard", dir.display());
+                let copied = if include_recording {
+                    handoff::copy_bundle_with_recording(&dir, true)?
+                } else {
+                    handoff::copy_bundle_to_clipboard(&dir)?
+                };
+                println!("{}", copied.note().unwrap_or("Copied to clipboard"));
             } else {
                 let target_session = handoff::send_to_opencode(&dir, session.as_deref(), reroute)?;
                 println!(

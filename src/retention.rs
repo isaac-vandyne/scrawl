@@ -1016,6 +1016,7 @@ mod tests {
         let trash_dir = tmp.0.join("Trash");
         std::fs::create_dir_all(&trash_dir).unwrap();
         let old = bundle(&captures, "scrawl-old", 8.0, true);
+        std::fs::write(old.join("recording-web.mp4"), b"derived recording").unwrap();
         let ancient = bundle(&captures, "scrawl-ancient", 31.0, false);
         let fake_trash = |path: &Path| -> Result<()> {
             std::fs::rename(path, trash_dir.join(path.file_name().unwrap()))?;
@@ -1037,6 +1038,8 @@ mod tests {
         );
         let media = trash_dir.join("scrawl-old media");
         assert!(media.join("recording.mov").is_file() && media.join("audio.wav").is_file());
+        assert!(media.join("recording-web.mp4").is_file());
+        assert!(!old.join("recording-web.mp4").exists());
         for kept in [
             "scrawl.json",
             "summary.md",

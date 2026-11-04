@@ -165,6 +165,7 @@ struct ViewState {
     shortcuts: Vec<Shortcut>,
     transcriber: Transcriber,
     video_export: bool,
+    include_compressed_recording: bool,
     retention: Retention,
     captures_size: Option<String>,
     permissions: Vec<PermissionRow>,
@@ -1241,6 +1242,7 @@ impl SettingsWindow {
             _ => None,
         };
         let video = state.video_export;
+        let include_recording = state.include_compressed_recording;
         div()
             .flex()
             .flex_col()
@@ -1249,6 +1251,14 @@ impl SettingsWindow {
             .when_some(speech, |pane, (text, error)| {
                 pane.child(caption(theme, &text, error))
             })
+            .when(!WINDOWS, |pane| pane
+                .child(header(theme, "Sharing"))
+                .child(group(theme, vec![row(theme, "Include compressed recording", true,
+                    switch(theme, "settings-include-recording", include_recording, true)
+                        .on_click(cx.listener(move |view, _, _, _| {
+                            view.set("includeCompressedRecording", (!include_recording).into());
+                        }))).into_any_element()]))
+                .child(caption(theme, "Video is at least 80% smaller; the original is kept. Browsers paste image, video and feedback as three attachments. Off keeps feedback inline. Requires ffmpeg.", false)))
             .child(header(theme, "Experimental"))
             .child(group(
                 theme,

@@ -733,6 +733,32 @@ pub fn summary_markdown_with(
     bundle_dir: &std::path::Path,
     agent_context: bool,
 ) -> String {
+    summary_markdown_for(bundle, Some(bundle_dir), agent_context, false, false)
+}
+
+/// The remote handoff keeps feedback and time references, without asking a cloud agent to open
+/// this Mac's generated capture paths. User-provided text is preserved verbatim.
+pub fn clipboard_markdown(
+    bundle: &ScrawlBundle,
+    image_attached: bool,
+    recording_attached: bool,
+) -> String {
+    summary_markdown_for(
+        bundle,
+        None,
+        crate::handoff::experiment(crate::handoff::AGENT_CONTEXT),
+        image_attached,
+        recording_attached,
+    )
+}
+
+fn summary_markdown_for(
+    bundle: &ScrawlBundle,
+    bundle_dir: Option<&std::path::Path>,
+    agent_context: bool,
+    image_attached: bool,
+    recording_attached: bool,
+) -> String {
     let mut target = bundle
         .target
         .app
@@ -763,11 +789,13 @@ pub fn summary_markdown_with(
             }
         }
     }
-    let mut out = format!(
-        "[scrawl {} · {target} · {}]\n",
-        format_clock(bundle.duration_ms),
-        bundle_dir.display()
-    );
+    let mut out = bundle_dir.map_or_else(String::new, |directory| {
+        format!(
+            "[scrawl {} · {target} · {}]\n",
+            format_clock(bundle.duration_ms),
+            directory.display()
+        )
+    });
     if let Some(dest) = &bundle.destination {
         let title = if dest.title.is_empty() {
             &dest.session
@@ -780,9 +808,17 @@ pub fn summary_markdown_with(
         }
         out.push('\n');
     }
-    if !bundle.keyframes.is_empty() {
+    if bundle_dir.is_some() && !bundle.keyframes.is_empty() {
         out.push_str(LOOK_AT_IMAGES);
         out.push('\n');
+    } else if image_attached {
+        out.push_str("Use the attached image to match feedback to the numbered keyframes.\n");
+    }
+    if recording_attached && bundle.video_offset_ms >= 1_000 {
+        out.push_str(&format!(
+            "Recording time 0:00 matches capture time {}.\n",
+            format_clock(bundle.video_offset_ms)
+        ));
     }
     // The screen at the start and the app's own values, on one line.
     let start_screen = bundle.screen_at(0);
@@ -806,10 +842,14 @@ pub fn summary_markdown_with(
         out.push_str(&format!("Note: {}\n", note.trim()));
     }
     if let Some(crop) = &bundle.autocrop {
-        out.push_str(&format!(
-            "Cropped to: {} (full frames in {}/)\n",
-            crop.label, crop.full_frames
-        ));
+        if bundle_dir.is_some() {
+            out.push_str(&format!(
+                "Cropped to: {} (full frames in {}/)\n",
+                crop.label, crop.full_frames
+            ));
+        } else {
+            out.push_str(&format!("Cropped to: {}\n", crop.label));
+        }
     }
     if let Some(missing) = &bundle.transcript.missing
         && bundle.transcript.text.trim().is_empty()

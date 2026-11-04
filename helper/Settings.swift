@@ -158,6 +158,7 @@ struct SettingsState: Decodable, Equatable {
   var microphone = SettingsMicrophone()
   var transcriber = SettingsTranscriber()
   var videoExport = false
+  var includeCompressedRecording = false
   var lowerPlayback = false
   var playbackLevel = 20
   var retention = SettingsRetention()
@@ -1005,6 +1006,13 @@ struct SettingsView: View {
       if t.engine == "apple", t.speech?.notReady == true, let line = t.speech?.line {
         SettingsCaption(text: line)
       }
+      SettingsHeader("Sharing")
+      SettingsGroup {
+        SettingsRow(title: "Include compressed recording") {
+          SettingsSwitch(on: state.includeCompressedRecording) { model.set("includeCompressedRecording", $0) }
+        }
+      }
+      SettingsCaption(text: "Video is at least 80% smaller; the original is kept. Browsers paste image, video and feedback as three attachments. Off keeps feedback inline. Requires ffmpeg.")
       SettingsHeader("Experimental")
       SettingsGroup {
         SettingsRow(title: "Video export") {

@@ -273,8 +273,161 @@ pub fn copy_png_and_text_to_clipboard(png_bytes: &[u8], text: Option<&str>) -> R
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 fn clipboard_payload(bundle_dir: &Path) -> Result<(Option<Vec<u8>>, String)> {
     let (directory, bundle) = load_bundle(bundle_dir)?;
-    let summary = crate::sketch::summary_markdown(&bundle, &directory);
-    Ok((fs::read(directory.join(&bundle.contact_sheet)).ok(), summary))
+    let image = fs::read(directory.join(&bundle.contact_sheet)).ok();
+    let summary = crate::sketch::clipboard_markdown(&bundle, image.is_some(), false);
+    Ok((image, summary))
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ClipboardCopy {
+    Feedback,
+    Recording,
+    RecordingUnavailable,
+    Superseded,
+}
+
+impl ClipboardCopy {
+    pub fn note(self) -> Option<&'static str> {
+        match self {
+            Self::Feedback => None,
+            Self::Recording => Some("Copied · recording included"),
+            Self::RecordingUnavailable => Some("Copied · recording unavailable"),
+            Self::Superseded => Some("Saved · newer copy kept"),
+        }
+    }
+}
+
+struct ClipboardState(std::sync::Mutex<u64>);
+
+impl ClipboardState {
+    const fn new() -> Self { Self(std::sync::Mutex::new(0)) }
+
+    fn reserve(&self) -> u64 {
+        let mut current = self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        *current = current.wrapping_add(1);
+        *current
+    }
+
+    fn is_current(&self, generation: u64) -> bool {
+        *self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner) == generation
+    }
+
+    fn commit(&self, generation: u64, write: impl FnOnce() -> Result<ClipboardCopy>) -> Result<ClipboardCopy> {
+        let current = self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if *current != generation { return Ok(ClipboardCopy::Superseded); }
+        write()
+    }
+}
+
+static CLIPBOARD_STATE: ClipboardState = ClipboardState::new();
+
+#[derive(Clone, Copy)]
+pub struct ClipboardRequest {
+    generation: u64,
+    include_recording: bool,
+}
+
+impl ClipboardRequest {
+    pub fn is_current(self) -> bool { CLIPBOARD_STATE.is_current(self.generation) }
+}
+
+/// Reserve on the user action before enqueueing work, so slower old encodes cannot overwrite
+/// the clipboard after a newer copy. The lock covers only request ordering and native writes.
+pub fn begin_clipboard_copy() -> ClipboardRequest {
+    clipboard_request(include_compressed_recording())
+}
+
+fn clipboard_request(include_recording: bool) -> ClipboardRequest {
+    ClipboardRequest { generation: CLIPBOARD_STATE.reserve(), include_recording }
+}
+
+pub const FEEDBACK_FILE: &str = "scrawl-feedback.txt";
+
+/// Persistent files are required: browsers read their bytes only when the user pastes.
+#[cfg(target_os = "macos")]
+fn recording_clipboard_files(
+    directory: &Path,
+    bundle: &ScrawlBundle,
+    image: Option<&[u8]>,
+    request: ClipboardRequest,
+) -> Result<ClipboardCopy> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+
+    let _claim = crate::retention::claim(directory).context("Recording media is being cleaned up")?;
+    let video = crate::web_recording::prepare(directory, bundle)?;
+    let sheet = if image.is_some() {
+        let path = directory.join(&bundle.contact_sheet).canonicalize()
+            .context("Contact sheet is unavailable")?;
+        ensure!(path.starts_with(directory), "Contact sheet is outside the capture");
+        Some(path)
+    } else {
+        None
+    };
+    let summary = crate::sketch::clipboard_markdown(bundle, image.is_some(), true);
+    let feedback = directory.join(FEEDBACK_FILE);
+    let temporary = directory.join(format!(".scrawl-feedback-{}.tmp", crate::make_bundle_id()));
+    let written = (|| -> Result<ClipboardCopy> {
+        let mut file = fs::OpenOptions::new().create_new(true).write(true).mode(0o600)
+            .open(&temporary).context("Could not prepare feedback attachment")?;
+        file.write_all(summary.as_bytes()).context("Could not write feedback attachment")?;
+        drop(file);
+        fs::rename(&temporary, &feedback).context("Could not finish feedback attachment")?;
+        CLIPBOARD_STATE.commit(request.generation, || {
+            copy_recording_files(sheet.as_deref(), image, &video, &feedback, &summary)?;
+            Ok(ClipboardCopy::Recording)
+        })
+    })();
+    let _ = fs::remove_file(temporary);
+    written
+}
+
+/// File URLs carry real PNG/MP4/text files. Chromium deliberately suppresses clipboard text
+/// beside native filenames, so the feedback is also an attachment instead of being lost.
+#[cfg(target_os = "macos")]
+fn copy_recording_files(
+    sheet: Option<&Path>,
+    image: Option<&[u8]>,
+    video: &Path,
+    feedback: &Path,
+    summary: &str,
+) -> Result<()> {
+    use objc2::runtime::ProtocolObject;
+    use objc2_app_kit::{NSPasteboard, NSPasteboardItem, NSPasteboardWriting,
+        NSPasteboardTypeFileURL, NSPasteboardTypePNG, NSPasteboardTypeString};
+    use objc2_foundation::{NSArray, NSData, NSString};
+
+    let mut items = Vec::new();
+    for path in sheet.into_iter().chain([video, feedback]) {
+        let item = NSPasteboardItem::new();
+        ensure!(item.setString_forType(&NSString::from_str(&file_uri(path)), unsafe { NSPasteboardTypeFileURL }),
+            "Could not copy attachment");
+        items.push(item);
+    }
+    let first = items.first().context("No clipboard attachments")?;
+    if sheet.is_some() && let Some(image) = image {
+        ensure!(first.setData_forType(&NSData::with_bytes(image), unsafe { NSPasteboardTypePNG }),
+            "Could not copy image");
+    }
+    ensure!(first.setString_forType(&NSString::from_str(summary), unsafe { NSPasteboardTypeString }),
+        "Could not copy feedback");
+    let objects: Vec<_> = items.iter()
+        .map(|item| ProtocolObject::<dyn NSPasteboardWriting>::from_ref(&**item)).collect();
+    let board = NSPasteboard::generalPasteboard();
+    board.clearContents();
+    ensure!(board.writeObjects(&NSArray::from_slice(&objects)), "Could not copy attachments");
+    // Materialize every representation through the server before releasing the writer. On
+    // the general pasteboard, a short-lived CLI otherwise leaves only its first item after
+    // exiting, even though writeObjects succeeded and pasteboardItems initially showed all.
+    // Reading the count alone is insufficient; eagerly read each item's actual type data.
+    let published = board.pasteboardItems().context("Clipboard attachments are unavailable")?;
+    ensure!(published.len() == items.len(), "Clipboard attachments are incomplete");
+    for item in published.iter() {
+        for kind in item.types().iter() {
+            ensure!(item.dataForType(&kind).is_some(), "Clipboard attachment data is unavailable");
+        }
+    }
+    Ok(())
 }
 
 /// Leaves the contact sheet and the text on the clipboard together, so one ⌘V (Ctrl+V on Windows)
@@ -282,14 +435,40 @@ fn clipboard_payload(bundle_dir: &Path) -> Result<(Option<Vec<u8>>, String)> {
 /// half it can actually open. An unreadable sheet, or an image the clipboard refuses, falls back
 /// to the text. See `docs/keyframes-and-text.md` for what a composer does with both flavors.
 #[cfg(any(target_os = "macos", target_os = "windows"))]
-pub fn copy_bundle_to_clipboard(bundle_dir: &Path) -> Result<()> {
+pub fn copy_bundle_to_clipboard(bundle_dir: &Path) -> Result<ClipboardCopy> {
+    copy_bundle_for_request(bundle_dir, begin_clipboard_copy())
+}
+
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+pub fn copy_bundle_with_recording(bundle_dir: &Path, include_recording: bool) -> Result<ClipboardCopy> {
+    copy_bundle_for_request(bundle_dir, clipboard_request(include_recording))
+}
+
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+pub fn copy_bundle_for_request(bundle_dir: &Path, request: ClipboardRequest) -> Result<ClipboardCopy> {
+    if !request.is_current() { return Ok(ClipboardCopy::Superseded); }
     let (image, summary) = clipboard_payload(bundle_dir)?;
-    if let Some(image) = image
-        && copy_png_and_text_to_clipboard(&image, Some(&summary)).is_ok()
-    {
-        return Ok(());
+    let mut outcome = ClipboardCopy::Feedback;
+    if request.include_recording {
+        #[cfg(target_os = "macos")]
+        {
+            let (directory, bundle) = load_bundle(bundle_dir)?;
+            match recording_clipboard_files(&directory, &bundle, image.as_deref(), request) {
+                Ok(copied) => return Ok(copied),
+                Err(error) => crate::capture::scrawl_log(format!("Recording attachment unavailable: {error:#}")),
+            }
+        }
+        outcome = ClipboardCopy::RecordingUnavailable;
     }
-    copy_string_to_clipboard(&summary)
+    CLIPBOARD_STATE.commit(request.generation, || {
+        if let Some(image) = image
+            && copy_png_and_text_to_clipboard(&image, Some(&summary)).is_ok()
+        {
+            return Ok(outcome);
+        }
+        copy_string_to_clipboard(&summary)?;
+        Ok(outcome)
+    })
 }
 
 /// Pastes both the contact-sheet image and the transcript/keyframe text into the active app
@@ -297,55 +476,89 @@ pub fn copy_bundle_to_clipboard(bundle_dir: &Path) -> Result<()> {
 /// provided (from dragging the Paste chip onto a window/input), clicks at that screen coordinate
 /// first to focus it.
 #[cfg(any(target_os = "macos", target_os = "windows"))]
-pub fn paste_bundle_at_target(bundle_dir: &Path, click_target: Option<[f32; 2]>) -> Result<()> {
+pub fn paste_bundle_at_target(bundle_dir: &Path, click_target: Option<[f32; 2]>, request: ClipboardRequest) -> Result<()> {
+    if !request.is_current() { return Ok(()); }
     if let Some([x, y]) = click_target {
         crate::capture::post_synthetic_click(f64::from(x), f64::from(y));
         std::thread::sleep(std::time::Duration::from_millis(65));
     } else {
         crate::capture::ensure_external_app_active();
     }
-    paste_bundle_image_and_text(bundle_dir)
+    paste_bundle_image_and_text(bundle_dir, request)
 }
 
 #[cfg(any(target_os = "macos", target_os = "windows"))]
-pub fn paste_bundle_image_and_text(bundle_dir: &Path) -> Result<()> {
+pub fn paste_bundle_image_and_text(bundle_dir: &Path, request: ClipboardRequest) -> Result<()> {
+    if !request.is_current() { return Ok(()); }
     let (directory, bundle) = load_bundle(bundle_dir)?;
     let sheet_path = directory.join(&bundle.contact_sheet);
     let image = fs::read(&sheet_path).context("Could not read contact sheet")?;
-    let summary = crate::sketch::summary_markdown(&bundle, &directory);
+    let summary = crate::sketch::clipboard_markdown(&bundle, true, false);
 
     crate::capture::wait_for_modifiers_released(350);
 
-    if crate::capture::is_frontmost_terminal() {
-        // In terminals (Ghostty / OpenCode TUI / Claude Code), pasting the image path first
-        // resolves and attaches `[Image 1]`, and the second paste inserts the text summary.
-        copy_string_to_clipboard(&sheet_path.display().to_string())?;
-    } else {
-        // In GUI apps (OpenCode Desktop, Slack, Linear, browsers), PNG-only attaches the image.
-        copy_png_to_clipboard(&image)?;
+    // This is the explicit Paste command, not capture completion. Reuse the standard file
+    // payload for browser destinations when recording sharing is enabled.
+    #[cfg(target_os = "macos")]
+    if request.include_recording && !crate::capture::is_frontmost_terminal() {
+        match copy_bundle_for_request(bundle_dir, request)? {
+            ClipboardCopy::Recording => {
+                if request.is_current() { crate::capture::post_synthetic_cmd_v(); }
+                return Ok(());
+            }
+            ClipboardCopy::Superseded => return Ok(()),
+            _ => {}
+        }
     }
+
+    let first = CLIPBOARD_STATE.commit(request.generation, || {
+        if crate::capture::is_frontmost_terminal() {
+            copy_string_to_clipboard(&sheet_path.display().to_string())?;
+        } else {
+            copy_png_to_clipboard(&image)?;
+        }
+        Ok(ClipboardCopy::Feedback)
+    })?;
+    if first == ClipboardCopy::Superseded { return Ok(()); }
     std::thread::sleep(std::time::Duration::from_millis(20));
+    if !request.is_current() { return Ok(()); }
     crate::capture::post_synthetic_cmd_v();
 
     std::thread::sleep(std::time::Duration::from_millis(160));
-    copy_string_to_clipboard(&summary)?;
+    let second = CLIPBOARD_STATE.commit(request.generation, || {
+        copy_string_to_clipboard(&summary)?;
+        Ok(ClipboardCopy::Feedback)
+    })?;
+    if second == ClipboardCopy::Superseded { return Ok(()); }
     std::thread::sleep(std::time::Duration::from_millis(20));
-    crate::capture::post_synthetic_cmd_v();
+    if request.is_current() {
+        crate::capture::post_synthetic_cmd_v();
+    }
     Ok(())
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-pub fn copy_bundle_to_clipboard(_bundle_dir: &Path) -> Result<()> {
+pub fn copy_bundle_to_clipboard(_bundle_dir: &Path) -> Result<ClipboardCopy> {
     bail!("Image and text clipboard handoff requires macOS or Windows")
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-pub fn paste_bundle_image_and_text(_bundle_dir: &Path) -> Result<()> {
+pub fn copy_bundle_with_recording(_bundle_dir: &Path, _include_recording: bool) -> Result<ClipboardCopy> {
+    bail!("Image and text clipboard handoff requires macOS or Windows")
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+pub fn copy_bundle_for_request(_bundle_dir: &Path, _request: ClipboardRequest) -> Result<ClipboardCopy> {
+    bail!("Image and text clipboard handoff requires macOS or Windows")
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+pub fn paste_bundle_image_and_text(_bundle_dir: &Path, _request: ClipboardRequest) -> Result<()> {
     bail!("Image and text paste handoff requires macOS or Windows")
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-pub fn paste_bundle_at_target(_bundle_dir: &Path, _click_target: Option<[f32; 2]>) -> Result<()> {
+pub fn paste_bundle_at_target(_bundle_dir: &Path, _click_target: Option<[f32; 2]>, _request: ClipboardRequest) -> Result<()> {
     bail!("Image and text paste handoff requires macOS or Windows")
 }
 
@@ -481,6 +694,9 @@ pub struct Config {
     /// Feature flag: shows **Export Last Capture as Video…** in the menu (default off).
     #[serde(default)]
     pub video_export: Option<bool>,
+    /// Attach a smaller MP4 with the image and feedback when copying a capture (default off).
+    #[serde(default)]
+    pub include_compressed_recording: Option<bool>,
     /// `"apple"` (default), `"hex"` or `"command"`: which engine transcribes recordings
     /// (`transcribe`). The command's own keys are read by `transcribe_command`, not here, so a
     /// malformed one can't reset this struct.
@@ -806,6 +1022,13 @@ pub fn video_export() -> bool {
     config().video_export.unwrap_or(false)
 }
 
+pub fn include_compressed_recording() -> bool {
+    if cfg!(test) {
+        return false;
+    }
+    config().include_compressed_recording.unwrap_or(false)
+}
+
 /// The configured transcriber name (`transcriber`) as written, unvalidated.
 pub fn transcriber() -> Option<String> {
     config().transcriber
@@ -967,12 +1190,13 @@ fn ssh(host: &str) -> Command {
 }
 
 /// Bundle files too big to hold up queueing the session; they follow in the background.
-pub const HEAVY_MEDIA: [&str; 5] = [
+pub const HEAVY_MEDIA: [&str; 6] = [
     "recording.mp4",
     "recording.mov",
     "audio.wav",
     "frames-full",
     "contact-sheet-full.png",
+    "recording-web.mp4",
 ];
 /// Present in a copied bundle while its heavy media is still arriving.
 pub const MEDIA_PENDING: &str = ".media-pending";
@@ -1744,6 +1968,33 @@ mod tests {
 
     struct Fixture(PathBuf);
     const FEEDBACK: &str = "Make this button easier to see — keep the label.";
+
+    #[test]
+    fn a_slow_old_copy_cannot_overwrite_a_newer_copy() {
+        use std::sync::{Arc, Barrier, Mutex};
+        let state = Arc::new(ClipboardState::new());
+        let written = Arc::new(Mutex::new(Vec::new()));
+        let ready = Arc::new(Barrier::new(2));
+        let old = state.reserve();
+        let worker = {
+            let (state, written, ready) = (state.clone(), written.clone(), ready.clone());
+            std::thread::spawn(move || {
+                ready.wait();
+                state.commit(old, || {
+                    written.lock().unwrap().push("old video");
+                    Ok(ClipboardCopy::Recording)
+                }).unwrap()
+            })
+        };
+        let newer = state.reserve();
+        state.commit(newer, || {
+            written.lock().unwrap().push("new feedback");
+            Ok(ClipboardCopy::Feedback)
+        }).unwrap();
+        ready.wait();
+        assert_eq!(worker.join().unwrap(), ClipboardCopy::Superseded);
+        assert_eq!(*written.lock().unwrap(), vec!["new feedback"]);
+    }
     impl Fixture {
         fn new() -> Self {
             static COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -1861,7 +2112,8 @@ mod tests {
         fs::write(path.join("contact-sheet.png"), &png).unwrap();
         let (image, summary) = clipboard_payload(&path).unwrap();
         assert_eq!(image, Some(png));
-        assert!(summary.starts_with("[scrawl 0:07 · Display ·"), "{summary}");
+        assert!(!summary.starts_with("[scrawl"), "{summary}");
+        assert!(!summary.contains(&path.display().to_string()), "{summary}");
         assert!(summary.contains(FEEDBACK), "{summary}");
     }
 
@@ -1873,8 +2125,35 @@ mod tests {
         let fixture = Fixture::new();
         let (image, summary) = clipboard_payload(&fixture.feedback_bundle("capture", 1)).unwrap();
         assert!(image.is_none());
-        assert!(summary.starts_with("[scrawl 0:07 · Display ·"), "{summary}");
+        assert!(!summary.starts_with("[scrawl"), "{summary}");
+        assert!(!summary.contains("attached image"), "{summary}");
         assert!(summary.contains(FEEDBACK), "{summary}");
+    }
+
+    #[test]
+    fn remote_feedback_omits_generated_paths_but_keeps_user_content_and_local_summary() {
+        let fixture = Fixture::new();
+        let path = fixture.feedback_bundle("remote", 1);
+        let (directory, mut bundle) = load_bundle(&path).unwrap();
+        bundle.note = Some("Check /Users/example/project/main.rs".into());
+        bundle.autocrop = Some(crate::model::AutocropInfo {
+            label: "Arc".into(),
+            full_frames: "/generated/frames-full".into(),
+            full_contact_sheet: "contact-sheet-full.png".into(),
+            crops: vec![], changes: vec![],
+        });
+        let remote = crate::sketch::clipboard_markdown(&bundle, true, false);
+        assert!(!remote.contains("[scrawl"));
+        assert!(!remote.contains(&directory.display().to_string()));
+        assert!(!remote.contains("/generated/frames-full"));
+        assert!(!remote.contains(crate::sketch::LOOK_AT_IMAGES));
+        assert!(remote.contains("/Users/example/project/main.rs"));
+        assert!(remote.contains("#0 (0:00)"));
+        assert!(remote.contains(FEEDBACK));
+        let local = crate::sketch::summary_markdown(&bundle, &directory);
+        assert!(local.starts_with("[scrawl"));
+        assert!(local.contains(&directory.display().to_string()));
+        assert!(local.contains("/generated/frames-full"));
     }
 
     /// The general pasteboard is process-wide: pasteboard tests take it one at a time, and they
@@ -1913,7 +2192,7 @@ mod tests {
         let text = unsafe { pasteboard.stringForType(NSPasteboardTypeString) }
             .expect("the transcript is on the pasteboard")
             .to_string();
-        assert!(text.starts_with("[scrawl 0:07 · Display ·"), "{text}");
+        assert!(!text.starts_with("[scrawl"), "{text}");
         assert!(text.contains(FEEDBACK), "{text}");
     }
 
@@ -1938,7 +2217,7 @@ mod tests {
         let text = unsafe { pasteboard.stringForType(NSPasteboardTypeString) }
             .expect("the transcript is on the pasteboard")
             .to_string();
-        assert!(text.starts_with("[scrawl 0:07 · Display ·"), "{text}");
+        assert!(!text.starts_with("[scrawl"), "{text}");
         assert!(text.contains(FEEDBACK), "{text}");
     }
 

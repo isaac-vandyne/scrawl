@@ -900,8 +900,9 @@ impl ScrawlCoordinator {
         if matches!(self.island_phase, IslandPhase::Completed { .. }) {
             self.dismiss_island(cx);
         }
+        let request = crate::handoff::begin_clipboard_copy();
         std::thread::spawn(move || {
-            if let Err(err) = crate::handoff::paste_bundle_image_and_text(&dir) {
+            if let Err(err) = crate::handoff::paste_bundle_image_and_text(&dir, request) {
                 scrawl_log(format!("paste_bundle_image_and_text error: {err}"));
             }
         });
@@ -1983,8 +1984,9 @@ impl ScrawlCoordinator {
             return;
         }
         self.mark_handled(&dir);
+        let request = crate::handoff::begin_clipboard_copy();
         std::thread::spawn(move || {
-            if let Err(err) = crate::handoff::paste_bundle_at_target(&dir, click_target) {
+            if let Err(err) = crate::handoff::paste_bundle_at_target(&dir, click_target, request) {
                 scrawl_log(format!("paste_bundle_at_target error: {err}"));
             }
         });
@@ -2831,6 +2833,7 @@ impl ScrawlCoordinator {
             })
         });
 
+        let copy_request = crate::handoff::begin_clipboard_copy();
         cx.spawn(async move |entity, cx| {
             let result = cx
                 .background_executor()
@@ -2894,6 +2897,17 @@ impl ScrawlCoordinator {
                 })
                 .await;
 
+            let (result, copied_note) = cx.background_executor().spawn(async move {
+                let copied_note = match &result.0 {
+                    Ok((directory, _, _)) => match crate::handoff::copy_bundle_for_request(directory, copy_request) {
+                        Ok(copied) => copied.note().map(str::to_owned),
+                        Err(_) => Some("Saved · clipboard unavailable".to_owned()),
+                    },
+                    Err(_) => None,
+                };
+                (result, copied_note)
+            }).await;
+
             // The capture is copied and shown as done as soon as it's built; routing (the
             // browser tab, the port's process, OpenCode's sessions) can take seconds, or longer
             // when the server is down, so its outcome follows when it's ready.
@@ -2903,9 +2917,9 @@ impl ScrawlCoordinator {
                     let mut frame_count = 1;
                     let mut routed = None;
                     coord.completed_dir = None;
+                    coord.completed_note = copied_note;
                     if let Ok((dir, bundle, _)) = finalized {
                         frame_count = bundle.keyframes.len();
-                        let _ = crate::handoff::copy_bundle_to_clipboard(&dir);
                         coord.completed_dir = Some(dir.clone());
                         coord.last_local_capture_ms = crate::now_epoch_ms();
                         if route.is_some() || look.is_some() {
@@ -4663,7 +4677,7 @@ impl Render for BundleReviewWindow {
                             .child(
                                 action_button(
                                     "btn-copy",
-                                    if status.as_deref() == Some("Copied ✓") {
+                                    if status.as_deref().is_some_and(|s| s.starts_with("Copied")) {
                                         "Copied"
                                     } else {
                                         "Copy"
@@ -4671,17 +4685,31 @@ impl Render for BundleReviewWindow {
                                     true,
                                 )
                                 .on_click(move |_, _, cx| {
-                                    let res = crate::handoff::copy_bundle_to_clipboard(&copy_dir);
+                                    let directory = copy_dir.clone();
+                                    let coordinator = c_copy.clone();
+                                    let request = crate::handoff::begin_clipboard_copy();
                                     c_copy.update(cx, |coord, cx| {
-                                        if res.is_ok() {
-                                            coord.mark_handled(&copy_dir);
-                                        }
-                                        coord.review_status = Some(match res {
-                                            Ok(()) => "Copied ✓".into(),
-                                            Err(e) => format!("Copy failed: {e}"),
-                                        });
+                                        coord.review_status = Some("Preparing copy…".into());
                                         cx.notify();
                                     });
+                                    cx.spawn(async move |cx| {
+                                        let worker_dir = directory.clone();
+                                        let result = cx.background_executor().spawn(async move {
+                                            crate::handoff::copy_bundle_for_request(&worker_dir, request)
+                                        }).await;
+                                        let _ = coordinator.update(cx, |coord, cx| {
+                                            if matches!(&result, Ok(copied) if *copied != crate::handoff::ClipboardCopy::Superseded) {
+                                                coord.mark_handled(&directory);
+                                            }
+                                            if request.is_current() && coord.review_bundle.as_ref().is_some_and(|(dir, _)| dir == &directory) {
+                                                coord.review_status = Some(match result {
+                                                    Ok(copied) => copied.note().unwrap_or("Copied ✓").into(),
+                                                    Err(_) => "Copy failed".into(),
+                                                });
+                                                cx.notify();
+                                            }
+                                        });
+                                    }).detach();
                                 }),
                             ),
                     )

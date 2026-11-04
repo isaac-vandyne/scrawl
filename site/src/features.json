@@ -248,12 +248,23 @@
       "id": "clipboard-image",
       "group": "finish",
       "name": "Image and text on one clipboard",
-      "says": "Copies the contact sheet together with the text, so one ⌘V offers a composer the image as well as the transcript.",
+      "says": "Copies the contact sheet with clean feedback and time references, without generated local capture paths.",
       "status": "main",
       "platforms": ["mac", "windows"],
       "added": "2026-10-20",
       "pr": 68,
       "docs": ["docs/keyframes-and-text.md"]
+    },
+    {
+      "id": "clipboard-recording",
+      "group": "finish",
+      "name": "Compressed recording attachment",
+      "says": "Optionally adds a complete MP4 at least 80% smaller. Browsers receive image, video and feedback as three files; the original stays unchanged.",
+      "status": "main",
+      "platforms": ["mac"],
+      "added": "2026-11-04",
+      "config": [{ "key": "includeCompressedRecording", "value": "true", "does": "Include a compressed recording with copied feedback; off by default" }],
+      "docs": ["docs/keyframes-and-text.md", "docs/export-and-retention.md", "docs/onboarding-and-settings.md"]
     },
     {
       "id": "review-window",
