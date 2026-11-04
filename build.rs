@@ -10,7 +10,9 @@ fn main() {
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("macos") {
         return;
     }
-    compile_laser_shader();
+    if std::env::var_os("CARGO_FEATURE_RUNTIME_SHADERS").is_none() {
+        compile_laser_shader();
+    }
     compile_helper();
     println!("cargo:rustc-link-arg=-Wl,-rpath,/usr/lib/swift");
     if let Ok(output) = Command::new("xcode-select").arg("-p").output()

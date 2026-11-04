@@ -1,69 +1,62 @@
 #!/usr/bin/env bash
 set -euo pipefail
-# pgrep/pkill fail under some locales (C.UTF-8), which left the old app running.
 export LC_ALL=C
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-# SCRAWL_APP_DIR builds the signed bundle somewhere else (staging for remote installs, see
-# install-app-remote.sh); SCRAWL_NO_LAUNCH=1 skips the ~/bin link and the restart.
-APP_DIR="${SCRAWL_APP_DIR:-${HOME}/Applications/Scrawl.app}"
-CONTENTS_DIR="${APP_DIR}/Contents"
-MACOS_DIR="${CONTENTS_DIR}/MacOS"
-RESOURCES_DIR="${CONTENTS_DIR}/Resources"
-FRAMEWORKS_DIR="${CONTENTS_DIR}/Frameworks"
-SIGN_ID="Developer ID Application: Christopher Langton (QC99C9JE59)"
-SPARKLE_PUBLIC_KEY="mIek27lttJe8cIBqVZFhh6reRKjpTx1h9ZY9OKWPtuM="
+APP_DIR="${SCRAWL_APP_DIR:-/Applications/Scrawl.app}"
+BUNDLE_ID="io.github.isaac-vandyne.scrawl"
+IDENTITY="${SCRAWL_SIGN_ID:--}"
+BACKUP_ROOT="${SCRAWL_BACKUP_DIR:-${HOME}/Library/Application Support/Scrawl Backups}"
+STAGE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/scrawl-install.XXXXXX")"
+STAGE_APP="${STAGE_DIR}/Scrawl.app"
+MACOS_DIR="${STAGE_APP}/Contents/MacOS"
+RESOURCES_DIR="${STAGE_APP}/Contents/Resources"
+trap 'rm -rf "${STAGE_DIR}"' EXIT
 
 cd "${REPO_DIR}"
-chmod +x "${REPO_DIR}/scripts/setup-sparkle.sh" "${REPO_DIR}/scripts/release-app.sh" 2>/dev/null || true
-SPARKLE_DIR="$("${REPO_DIR}/scripts/setup-sparkle.sh" 2>/dev/null || true)"
-taskpolicy -c utility cargo build -j 3
+BUILD_ARGS=(build --locked -j 3)
+RUNTIME_SHADERS="${SCRAWL_RUNTIME_SHADERS:-auto}"
+if [[ "${RUNTIME_SHADERS}" == "1" ]] || {
+  [[ "${RUNTIME_SHADERS}" == "auto" ]] && ! xcrun --sdk macosx metal --version >/dev/null 2>&1;
+}; then
+  BUILD_ARGS+=(--features runtime-shaders)
+  echo "Building with runtime Metal shaders."
+fi
+taskpolicy -c utility cargo "${BUILD_ARGS[@]}"
 
-mkdir -p "${MACOS_DIR}" "${RESOURCES_DIR}" "${FRAMEWORKS_DIR}" "${HOME}/bin"
-
-rm -f "${MACOS_DIR}/scrawl" "${MACOS_DIR}/scrawl-helper"
-cp -f "${REPO_DIR}/target/debug/scrawl" "${MACOS_DIR}/scrawl"
-cp -f "${REPO_DIR}/target/debug/scrawl-helper" "${MACOS_DIR}/scrawl-helper"
+mkdir -p "${MACOS_DIR}" "${RESOURCES_DIR}"
+cp "${REPO_DIR}/target/debug/scrawl" "${MACOS_DIR}/scrawl"
+cp "${REPO_DIR}/target/debug/scrawl-helper" "${MACOS_DIR}/scrawl-helper"
 chmod +x "${MACOS_DIR}/scrawl" "${MACOS_DIR}/scrawl-helper"
-
 if [[ -f "${REPO_DIR}/assets/Scrawl.icns" ]]; then
-  cp -f "${REPO_DIR}/assets/Scrawl.icns" "${RESOURCES_DIR}/Scrawl.icns"
+  cp "${REPO_DIR}/assets/Scrawl.icns" "${RESOURCES_DIR}/Scrawl.icns"
 fi
 
-if [[ -n "${SPARKLE_DIR}" && -d "${SPARKLE_DIR}/Sparkle.framework" ]]; then
-  rm -rf "${FRAMEWORKS_DIR}/Sparkle.framework"
-  /usr/bin/ditto "${SPARKLE_DIR}/Sparkle.framework" "${FRAMEWORKS_DIR}/Sparkle.framework"
+VERSION="$(awk -F '"' '/^version = / { print $2; exit }' Cargo.toml)"
+REVISION="$(git rev-parse HEAD)"
+BUILD_NUMBER="$(git rev-list --count HEAD)"
+if [[ -n "$(git status --porcelain --untracked-files=no)" ]]; then
+  REVISION="${REVISION}-dirty"
 fi
-
-cat > "${CONTENTS_DIR}/Info.plist" <<PLIST
+cat > "${STAGE_APP}/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-  <key>CFBundleExecutable</key>
-  <string>scrawl</string>
-  <key>CFBundleIconFile</key>
-  <string>Scrawl</string>
-  <key>CFBundleIdentifier</key>
-  <string>dev.kitlangton.scrawl</string>
-  <key>CFBundleInfoDictionaryVersion</key>
-  <string>6.0</string>
-  <key>CFBundleName</key>
-  <string>Scrawl</string>
-  <key>CFBundleDisplayName</key>
-  <string>Scrawl</string>
-  <key>CFBundlePackageType</key>
-  <string>APPL</string>
-  <key>CFBundleShortVersionString</key>
-  <string>0.1.0</string>
-  <key>CFBundleVersion</key>
-  <string>1</string>
-  <key>LSMinimumSystemVersion</key>
-  <string>15.0</string>
-  <key>LSUIElement</key>
-  <true/>
-  <key>NSHighResolutionCapable</key>
-  <true/>
+  <key>CFBundleExecutable</key><string>scrawl</string>
+  <key>CFBundleIconFile</key><string>Scrawl</string>
+  <key>CFBundleIdentifier</key><string>${BUNDLE_ID}</string>
+  <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
+  <key>CFBundleName</key><string>Scrawl</string>
+  <key>CFBundleDisplayName</key><string>Scrawl</string>
+  <key>CFBundlePackageType</key><string>APPL</string>
+  <key>CFBundleShortVersionString</key><string>${VERSION}</string>
+  <key>CFBundleVersion</key><string>${BUILD_NUMBER}</string>
+  <key>ScrawlSourceRepository</key><string>https://github.com/isaac-vandyne/scrawl</string>
+  <key>ScrawlSourceCommit</key><string>${REVISION}</string>
+  <key>LSMinimumSystemVersion</key><string>15.0</string>
+  <key>LSUIElement</key><true/>
+  <key>NSHighResolutionCapable</key><true/>
   <key>NSScreenCaptureUsageDescription</key>
   <string>Scrawl captures your screen to build annotated agent bundles.</string>
   <key>NSMicrophoneUsageDescription</key>
@@ -73,66 +66,72 @@ cat > "${CONTENTS_DIR}/Info.plist" <<PLIST
   <key>NSSpeechRecognitionUsageDescription</key>
   <string>Scrawl transcribes your narration on this Mac.</string>
   <key>NSAppleEventsUsageDescription</key>
-  <string>Scrawl reads the address of the browser tab you captured, to send a capture of a dev site to its project's session.</string>
-  <key>SUEnableAutomaticChecks</key>
-  <false/>
-  <key>SUAutomaticallyUpdate</key>
-  <false/>
-  <key>SUAllowsAutomaticUpdates</key>
-  <false/>
-  <key>SUFeedURL</key>
-  <string>https://scrawl.kitlangton.com/appcast.xml</string>
-  <key>SUPublicEDKey</key>
-  <string>${SPARKLE_PUBLIC_KEY}</string>
-  <key>SUVerifyUpdateBeforeExtraction</key>
-  <true/>
+  <string>Scrawl reads the browser tab's address to route a capture to its project's session.</string>
+  <key>SUEnableAutomaticChecks</key><false/>
+  <key>SUAutomaticallyUpdate</key><false/>
+  <key>SUAllowsAutomaticUpdates</key><false/>
 </dict>
 </plist>
 PLIST
 
-if security find-identity -v -p codesigning 2>/dev/null | grep -q "${SIGN_ID}"; then
-  IDENTITY="${SIGN_ID}"
-else
-  IDENTITY="-"
+# Fork installs deliberately contain no upstream Sparkle framework or update feed.
+codesign --force --sign "${IDENTITY}" --identifier "${BUNDLE_ID}.helper" "${MACOS_DIR}/scrawl-helper"
+codesign --force --sign "${IDENTITY}" --identifier "${BUNDLE_ID}" "${STAGE_APP}"
+codesign --verify --deep --strict "${STAGE_APP}"
+
+running_pids() {
+  local pid executable
+  for pid in $(pgrep -x scrawl 2>/dev/null || true); do
+    executable="$(ps -p "${pid}" -o comm= 2>/dev/null || true)"
+    if [[ "${executable}" == "${APP_DIR}/Contents/MacOS/scrawl" ]]; then
+      echo "${pid}"
+    fi
+  done
+}
+
+OLD_PIDS="$(running_pids)"
+if [[ -n "${OLD_PIDS}" ]]; then
+  kill ${OLD_PIDS}
+  for _ in {1..40}; do
+    [[ -z "$(running_pids)" ]] && break
+    sleep 0.05
+  done
+  if [[ -n "$(running_pids)" ]]; then
+    echo "Scrawl is still running; quit it before replacing the app." >&2
+    exit 1
+  fi
 fi
-if [[ -d "${FRAMEWORKS_DIR}/Sparkle.framework/Versions/B" ]]; then
-  SPARKLE_VER="${FRAMEWORKS_DIR}/Sparkle.framework/Versions/B"
-  codesign --force --sign "${IDENTITY}" "${SPARKLE_VER}/XPCServices/Installer.xpc"
-  codesign --force --sign "${IDENTITY}" --preserve-metadata=entitlements "${SPARKLE_VER}/XPCServices/Downloader.xpc"
-  codesign --force --sign "${IDENTITY}" "${SPARKLE_VER}/Autoupdate"
-  codesign --force --sign "${IDENTITY}" "${SPARKLE_VER}/Updater.app"
-  codesign --force --sign "${IDENTITY}" "${FRAMEWORKS_DIR}/Sparkle.framework"
+
+BACKUP_APP=""
+if [[ -e "${APP_DIR}" ]]; then
+  mkdir -p "${BACKUP_ROOT}"
+  BACKUP_APP="${BACKUP_ROOT}/Scrawl-$(date +%Y%m%d-%H%M%S)-$$.app"
+  mv "${APP_DIR}" "${BACKUP_APP}"
 fi
-codesign --force --sign "${IDENTITY}" --identifier "dev.kitlangton.scrawl.helper" "${MACOS_DIR}/scrawl-helper"
-codesign --force --sign "${IDENTITY}" --identifier "dev.kitlangton.scrawl" "${APP_DIR}"
+mkdir -p "$(dirname "${APP_DIR}")"
+if ! /usr/bin/ditto "${STAGE_APP}" "${APP_DIR}"; then
+  rm -rf "${APP_DIR}"
+  if [[ -n "${BACKUP_APP}" ]]; then
+    mv "${BACKUP_APP}" "${APP_DIR}"
+  fi
+  echo "Install failed; the previous app was restored." >&2
+  exit 1
+fi
+codesign --verify --deep --strict "${APP_DIR}"
+echo "Installed ${APP_DIR} (${REVISION})."
+if [[ -n "${BACKUP_APP}" ]]; then
+  echo "Previous app: ${BACKUP_APP}"
+fi
 
 if [[ "${SCRAWL_NO_LAUNCH:-0}" == "1" ]]; then
   exit 0
 fi
-
-ln -sf "${MACOS_DIR}/scrawl" "${HOME}/bin/scrawl"
-
-scrawl_running() {
-  local status=0
-  pgrep -f "Scrawl.app/Contents/MacOS/scrawl" >/dev/null || status=$?
-  case "${status}" in
-    0) return 0 ;;
-    1) return 1 ;;
-    *) echo "pgrep failed (exit ${status}); can't tell whether the old Scrawl stopped" >&2; exit 1 ;;
-  esac
-}
-
-pkill -f "Scrawl.app/Contents/MacOS/scrawl" 2>/dev/null || true
-pkill -f "target/debug/scrawl" 2>/dev/null || true
-for _ in {1..40}; do
-  scrawl_running || break
-  sleep 0.05
-done
-if scrawl_running; then
-  pgrep -fl "Scrawl.app/Contents/MacOS/scrawl" >&2 || true
-  echo "the old Scrawl is still running; quit it and run this again" >&2
+mkdir -p "${HOME}/bin"
+ln -sf "${APP_DIR}/Contents/MacOS/scrawl" "${HOME}/bin/scrawl"
+open -a "${APP_DIR}"
+sleep 0.3
+if [[ -z "$(running_pids)" ]]; then
+  echo "The app was installed but did not stay running." >&2
   exit 1
 fi
-open -a "${APP_DIR}" || (sleep 0.3 && open -n -a "${APP_DIR}")
-sleep 0.3
-pgrep -fl "Scrawl.app/Contents/MacOS/scrawl"
+echo "Running fork process: $(running_pids)"

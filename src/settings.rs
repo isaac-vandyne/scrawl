@@ -1420,7 +1420,7 @@ fn check_for_updates() {
 }
 
 #[cfg(not(target_os = "macos"))]
-const RELEASES_URL: &str = "https://github.com/kitlangton/scrawl/releases/latest";
+const RELEASES_URL: &str = "https://github.com/isaac-vandyne/scrawl/releases/latest";
 
 // MARK: The live window
 

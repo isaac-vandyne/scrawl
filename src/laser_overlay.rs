@@ -739,12 +739,18 @@ fn overlay_pipeline(device: &metal::DeviceRef) -> Result<RenderPipelineState, St
 }
 
 fn overlay_library(device: &metal::DeviceRef) -> Result<metal::Library, String> {
-    device
+    #[cfg(feature = "runtime-shaders")]
+    let library = device.new_library_with_source(
+        include_str!("laser_overlay.metal"),
+        &metal::CompileOptions::new(),
+    );
+    #[cfg(not(feature = "runtime-shaders"))]
+    let library = device
         .new_library_with_data(include_bytes!(concat!(
             env!("OUT_DIR"),
             "/laser_overlay.metallib"
-        )))
-        .map_err(|e| format!("Could not load laser shader library: {e}"))
+        )));
+    library.map_err(|e| format!("Could not load laser shader library: {e}"))
 }
 
 fn specialised_pipeline(
@@ -1561,6 +1567,7 @@ mod tests {
     /// The shader must load on the oldest macOS Scrawl supports (`LSMinimumSystemVersion` 15.0).
     /// Without `-mmacosx-version-min`, `xcrun metal` targets the build machine's macOS and the
     /// overlay (ink, laser, edge glow) silently fails to open on older systems.
+    #[cfg(not(feature = "runtime-shaders"))]
     #[test]
     fn shader_targets_the_minimum_supported_macos() {
         let library = include_bytes!(concat!(env!("OUT_DIR"), "/laser_overlay.metallib"));

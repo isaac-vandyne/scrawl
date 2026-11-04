@@ -1131,13 +1131,13 @@ struct SettingsView: View {
         .frame(height: 64)
       }
       if !state.updates {
-        SettingsCaption(text: "Updates work in the installed Scrawl.app.")
+        SettingsCaption(text: "This fork updates from source.")
       }
       SettingsHeader("Links")
       SettingsGroup {
         link("Website", "scrawl.kitlangton.com", "https://scrawl.kitlangton.com")
         SettingsSeparator()
-        link("Source", "github.com/kitlangton/scrawl", "https://github.com/kitlangton/scrawl")
+        link("Source", "github.com/isaac-vandyne/scrawl", "https://github.com/isaac-vandyne/scrawl")
         SettingsSeparator()
         SettingsRow(title: "Welcome tour") {
           SettingsButton(title: "Show") { model.act("tour") }

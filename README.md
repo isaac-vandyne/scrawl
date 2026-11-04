@@ -6,6 +6,24 @@ Press a shortcut (`⌥⇧S`) and Scrawl starts recording the screen. Talk, click
 
 ## Install
 
+This is Isaac's fork. Build and install it locally with:
+
+```sh
+RUSTUP_TOOLCHAIN=1.95.0 ./scripts/install-app.sh
+```
+
+The installer uses runtime Metal compilation when the offline Metal compiler is unavailable,
+so Command Line Tools can build it without full Xcode. The same path is available explicitly as
+`RUSTUP_TOOLCHAIN=1.95.0 cargo build --locked --features runtime-shaders`; the default Cargo build keeps precompiled shaders.
+Use a recent Rust toolchain (this fork is verified with Rust 1.95).
+
+It installs `/Applications/Scrawl.app`, backs up the previous app, and uses the fork's bundle
+identity. Set `SCRAWL_SIGN_ID` to a local signing identity, otherwise it signs ad hoc. macOS may ask
+for permissions for this new identity. The fork has no upstream Sparkle framework or update feed;
+rerun the installer to update from source.
+
+### Upstream releases
+
 Scrawl needs an Apple silicon Mac on macOS 15 or later (live transcription and Liquid Glass need
 macOS 26). Download the DMG from [scrawl.kitlangton.com](https://scrawl.kitlangton.com), or use
 Homebrew:

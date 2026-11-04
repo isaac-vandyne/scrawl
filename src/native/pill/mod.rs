@@ -195,10 +195,18 @@ impl MetalPipelines {
         let device = metal::Device::system_default().ok_or("No Metal device available")?;
         let queue = device.new_command_queue();
 
-        let metallib_bytes = include_bytes!(concat!(env!("OUT_DIR"), "/pill.metallib"));
-        let library = device
-            .new_library_with_data(metallib_bytes)
-            .map_err(|e| format!("Failed to load pill.metallib: {e}"))?;
+        #[cfg(feature = "runtime-shaders")]
+        let library = device.new_library_with_source(
+            include_str!("pill.metal"),
+            &metal::CompileOptions::new(),
+        );
+        #[cfg(not(feature = "runtime-shaders"))]
+        let library = device.new_library_with_data(include_bytes!(concat!(
+            env!("OUT_DIR"),
+            "/pill.metallib"
+        )));
+        let library = library
+            .map_err(|e| format!("Failed to load pill shaders: {e}"))?;
 
         let make_pipeline = |vs_name: &str,
                              fs_name: &str,

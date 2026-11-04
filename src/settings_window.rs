@@ -337,7 +337,7 @@ fn open(request: Request, cx: &mut App) {
             is_resizable: false,
             is_minimizable: true,
             window_background: WindowBackgroundAppearance::Opaque,
-            app_id: Some("dev.kitlangton.scrawl".into()),
+            app_id: Some("io.github.isaac-vandyne.scrawl".into()),
             ..Default::default()
         },
         move |window, cx| {
@@ -1635,7 +1635,7 @@ impl SettingsWindow {
         if !state.updates {
             column = column.child(caption(
                 theme,
-                "Updates work in the installed Scrawl.app.",
+                "This fork updates from source.",
                 false,
             ));
         }
@@ -1652,8 +1652,8 @@ impl SettingsWindow {
                 link(
                     "settings-source",
                     "Source",
-                    "github.com/kitlangton/scrawl",
-                    "https://github.com/kitlangton/scrawl",
+                    "github.com/isaac-vandyne/scrawl",
+                    "https://github.com/isaac-vandyne/scrawl",
                 )
                 .into_any_element(),
                 row(
