@@ -6,12 +6,36 @@ REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 APP_DIR="${SCRAWL_APP_DIR:-/Applications/Scrawl.app}"
 BUNDLE_ID="io.github.isaac-vandyne.scrawl"
 IDENTITY="${SCRAWL_SIGN_ID:--}"
-BACKUP_ROOT="${SCRAWL_BACKUP_DIR:-${HOME}/Library/Application Support/Scrawl Backups}"
 STAGE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/scrawl-install.XXXXXX")"
 STAGE_APP="${STAGE_DIR}/Scrawl.app"
+ROLLBACK_DIR=""
+ROLLBACK_APP=""
 MACOS_DIR="${STAGE_APP}/Contents/MacOS"
 RESOURCES_DIR="${STAGE_APP}/Contents/Resources"
-trap 'rm -rf "${STAGE_DIR}"' EXIT
+REPLACEMENT_STARTED=0
+INSTALL_SUCCEEDED=0
+finish_install() {
+  local result=$?
+  trap - EXIT
+  if [[ "${INSTALL_SUCCEEDED}" != "1" ]] && {
+    [[ "${REPLACEMENT_STARTED}" == "1" ]] || [[ -e "${ROLLBACK_APP}" ]];
+  }; then
+    rm -rf "${APP_DIR}"
+    if [[ -e "${ROLLBACK_APP}" ]]; then
+      if ! mv "${ROLLBACK_APP}" "${APP_DIR}"; then
+        echo "Rollback failed; the previous app is preserved at ${ROLLBACK_APP}." >&2
+        exit 1
+      fi
+      echo "Install failed; the previous app was restored." >&2
+    fi
+  fi
+  if [[ -n "${ROLLBACK_DIR}" ]]; then
+    rm -rf "${ROLLBACK_DIR}"
+  fi
+  rm -rf "${STAGE_DIR}"
+  exit "${result}"
+}
+trap finish_install EXIT
 
 cd "${REPO_DIR}"
 BUILD_ARGS=(build --locked -j 3)
@@ -79,6 +103,12 @@ codesign --force --sign "${IDENTITY}" --identifier "${BUNDLE_ID}.helper" "${MACO
 codesign --force --sign "${IDENTITY}" --identifier "${BUNDLE_ID}" "${STAGE_APP}"
 codesign --verify --deep --strict "${STAGE_APP}"
 
+# Keep the rollback on the destination filesystem, so moving the existing app is an atomic
+# rename, never a cross-volume copy that could leave a partial rollback if copying fails.
+mkdir -p "$(dirname "${APP_DIR}")"
+ROLLBACK_DIR="$(mktemp -d "$(dirname "${APP_DIR}")/.scrawl-rollback.XXXXXX")"
+ROLLBACK_APP="${ROLLBACK_DIR}/previous"
+
 running_pids() {
   local pid executable
   for pid in $(pgrep -x scrawl 2>/dev/null || true); do
@@ -102,28 +132,21 @@ if [[ -n "${OLD_PIDS}" ]]; then
   fi
 fi
 
-BACKUP_APP=""
 if [[ -e "${APP_DIR}" ]]; then
-  mkdir -p "${BACKUP_ROOT}"
-  BACKUP_APP="${BACKUP_ROOT}/Scrawl-$(date +%Y%m%d-%H%M%S)-$$.app"
-  mv "${APP_DIR}" "${BACKUP_APP}"
+  # A temporary hidden rollback copy avoids leaving old .app bundles discoverable by macOS.
+  # Keep no historical builds or archives after a verified successful install.
+  mv "${APP_DIR}" "${ROLLBACK_APP}"
 fi
-mkdir -p "$(dirname "${APP_DIR}")"
+REPLACEMENT_STARTED=1
 if ! /usr/bin/ditto "${STAGE_APP}" "${APP_DIR}"; then
-  rm -rf "${APP_DIR}"
-  if [[ -n "${BACKUP_APP}" ]]; then
-    mv "${BACKUP_APP}" "${APP_DIR}"
-  fi
-  echo "Install failed; the previous app was restored." >&2
+  echo "Could not copy the new app." >&2
   exit 1
 fi
 codesign --verify --deep --strict "${APP_DIR}"
 echo "Installed ${APP_DIR} (${REVISION})."
-if [[ -n "${BACKUP_APP}" ]]; then
-  echo "Previous app: ${BACKUP_APP}"
-fi
 
 if [[ "${SCRAWL_NO_LAUNCH:-0}" == "1" ]]; then
+  INSTALL_SUCCEEDED=1
   exit 0
 fi
 mkdir -p "${HOME}/bin"
@@ -134,4 +157,5 @@ if [[ -z "$(running_pids)" ]]; then
   echo "The app was installed but did not stay running." >&2
   exit 1
 fi
+INSTALL_SUCCEEDED=1
 echo "Running fork process: $(running_pids)"

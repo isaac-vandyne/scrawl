@@ -782,7 +782,7 @@
       "id": "mac-download",
       "group": "install",
       "name": "Local Mac fork install",
-      "says": "Builds and signs this fork locally, installs Scrawl.app, and backs up the previous app.",
+      "says": "Builds and signs this fork locally and keeps only the latest installed Scrawl.app, with temporary rollback during installation.",
       "status": "main",
       "platforms": ["mac"],
       "note": "Uses a local signing identity or ad hoc signing. Upstream releases still offer notarized DMGs and Homebrew.",

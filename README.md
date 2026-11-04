@@ -17,8 +17,9 @@ so Command Line Tools can build it without full Xcode. The same path is availabl
 `RUSTUP_TOOLCHAIN=1.95.0 cargo build --locked --features runtime-shaders`; the default Cargo build keeps precompiled shaders.
 Use a recent Rust toolchain (this fork is verified with Rust 1.95).
 
-It installs `/Applications/Scrawl.app`, backs up the previous app, and uses the fork's bundle
-identity. Set `SCRAWL_SIGN_ID` to a local signing identity, otherwise it signs ad hoc. macOS may ask
+It installs `/Applications/Scrawl.app`, keeps a hidden rollback copy only until installation
+succeeds, and uses the fork's bundle identity. Set `SCRAWL_SIGN_ID` to a local signing identity,
+otherwise it signs ad hoc. macOS may ask
 for permissions for this new identity. The fork has no upstream Sparkle framework or update feed;
 rerun the installer to update from source.
 
